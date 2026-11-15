@@ -40,21 +40,23 @@ for rom in $REF_ROMS; do
 	for secs in $REF_SECS; do
 		for btn in 0 1; do
 			want=$("$REF" hash "$file" "$secs" "$btn")
-			got=$("$CUR" hash "$file" "$secs" "$btn")
-			case "$got" in
-				"ticks="*" hash="*) ;;
-				*)
-					echo "FAIL ref $rom ${secs}s btn=$btn: no result ($got)"
+			for ff in "" ff; do
+				got=$("$CUR" hash "$file" "$secs" "$btn" $ff)
+				case "$got" in
+					"ticks="*" hash="*) ;;
+					*)
+						echo "FAIL ref $rom ${secs}s btn=$btn $ff: no result ($got)"
+						fail=1
+						continue
+						;;
+				esac
+				if [ "$want" = "$got" ]; then
+					echo "PASS ref $rom ${secs}s btn=$btn $ff ($got)"
+				else
+					echo "FAIL ref $rom ${secs}s btn=$btn $ff: want $want, got $got"
 					fail=1
-					continue
-					;;
-			esac
-			if [ "$want" = "$got" ]; then
-				echo "PASS ref $rom ${secs}s btn=$btn ($got)"
-			else
-				echo "FAIL ref $rom ${secs}s btn=$btn: want $want, got $got"
-				fail=1
-			fi
+				fi
+			done
 		done
 	done
 done

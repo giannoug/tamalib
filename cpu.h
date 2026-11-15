@@ -212,6 +212,8 @@ void cpu_free_bp(breakpoint_t **list);
 
 void cpu_set_speed(u8_t speed);
 
+void cpu_set_halt_ff(bool_t en, u32_t limit_tick);
+
 state_t * cpu_get_state(void);
 
 u32_t cpu_get_depth(void);

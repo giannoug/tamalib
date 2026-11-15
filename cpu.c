@@ -32,6 +32,9 @@
 #define TICK_FRACTION				15625
 #define OSC1_CYCLE_DURATION			(TICK_FRACTION * TICK_FREQUENCY / OSC1_FREQUENCY) // 15625
 #define OSC3_CYCLE_DURATION			(TICK_FRACTION * TICK_FREQUENCY / OSC3_FREQUENCY) // 512
+#define CYCLE_DURATION				((cpu_frequency == OSC3_FREQUENCY) ? OSC3_CYCLE_DURATION : OSC1_CYCLE_DURATION)
+
+#define HALT_CYCLES				5
 
 #define TIMER_2HZ_PERIOD			(TICK_FREQUENCY/2) // in ticks
 #define TIMER_4HZ_PERIOD			(TICK_FREQUENCY/4) // in ticks
@@ -219,6 +222,9 @@ static u32_t scaled_cycle_accumulator = 0; // in 1/TICK_FRACTION ticks
 static u8_t previous_cycles = 0;
 static u32_t ts_remainder = 0; // in 1/(TICK_FREQUENCY * speed_ratio) timestamp units
 
+static bool_t halt_ff_enabled = 0;
+static u32_t halt_ff_limit = 0; // in ticks
+
 
 static state_t cpu_state = {
 	.pc = &pc,
@@ -305,6 +311,12 @@ void cpu_set_speed(u8_t speed)
 		speed_ratio = speed;
 		ts_remainder = 0;
 	}
+}
+
+void cpu_set_halt_ff(bool_t en, u32_t limit_tick)
+{
+	halt_ff_enabled = en;
+	halt_ff_limit = limit_tick;
 }
 
 state_t * cpu_get_state(void)
@@ -1737,7 +1749,7 @@ static u8_t lookup_op(u12_t op)
 }
 
 
-static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
+static timestamp_t wait_for_cycles(timestamp_t since, u32_t cycles) {
 	timestamp_t deadline;
 	u32_t ticks_pending;
 	u32_t scaled_ts;
@@ -1747,7 +1759,7 @@ static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
 	 * both clocks' cycles are an exact multiple of, so that no time is lost
 	 * when the CPU clock is switched.
 	 */
-	scaled_cycle_accumulator += cycles * ((cpu_frequency == OSC3_FREQUENCY) ? OSC3_CYCLE_DURATION : OSC1_CYCLE_DURATION);
+	scaled_cycle_accumulator += cycles * CYCLE_DURATION;
 	ticks_pending = scaled_cycle_accumulator/TICK_FRACTION;
 
 	if (ticks_pending > 0) {
@@ -1947,6 +1959,66 @@ static void handle_timers(void)
 	}
 }
 
+/* Returns the number of ticks left before a timer expires (0 if it already has) */
+static u32_t ticks_before(u32_t timestamp, u32_t period, u32_t ticks)
+{
+	u32_t elapsed = tick_counter - timestamp;
+	u32_t left = (elapsed < period) ? period - elapsed : 0;
+
+	return (left < ticks) ? left : ticks;
+}
+
+/* Returns the number of cycles a halted CPU goes through in one step: the
+ * duration of one HALT, or with the fast-forward, of all the following HALTs
+ * that would only increment the tick counter, i.e. up to the next timer
+ * expiration or the fast-forward limit. Accounting them at once gives exactly
+ * the same state as stepping through them.
+ */
+static u32_t halt_cycles(void)
+{
+	u32_t ticks;
+	u8_t i;
+
+	if (!halt_ff_enabled || speed_ratio != 0) {
+		return HALT_CYCLES;
+	}
+
+	/* Any pending interrupt will be processed by this step */
+	if (I) {
+		for (i = 0; i < INT_SLOT_NUM; i++) {
+			if (interrupts[i].triggered) {
+				return HALT_CYCLES;
+			}
+		}
+	}
+
+	/* The limit has been reached already */
+	if (tick_counter - halt_ff_limit < 0x80000000) {
+		return HALT_CYCLES;
+	}
+
+	/* Ticks before the next step that does something (at most TIMER_256HZ_PERIOD) */
+	ticks = halt_ff_limit - tick_counter;
+	ticks = ticks_before(clk_timer_2hz_timestamp, TIMER_2HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_4hz_timestamp, TIMER_4HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_8hz_timestamp, TIMER_8HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_16hz_timestamp, TIMER_16HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_32hz_timestamp, TIMER_32HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_64hz_timestamp, TIMER_64HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_128hz_timestamp, TIMER_128HZ_PERIOD, ticks);
+	ticks = ticks_before(clk_timer_256hz_timestamp, TIMER_256HZ_PERIOD, ticks);
+	if (prog_timer_enabled) {
+		ticks = ticks_before(prog_timer_timestamp, TIMER_256HZ_PERIOD, ticks);
+	}
+
+	if (ticks == 0) {
+		return HALT_CYCLES;
+	}
+
+	/* The HALTs leaving the tick counter below that point, plus the one reaching it */
+	return ((ticks * TICK_FRACTION - scaled_cycle_accumulator - 1)/(HALT_CYCLES * CYCLE_DURATION) + 1) * HALT_CYCLES;
+}
+
 void cpu_reset(void)
 {
 	u13_t i;
@@ -1998,6 +2070,7 @@ void cpu_reset(void)
 	cpu_frequency = OSC1_FREQUENCY;
 	scaled_cycle_accumulator = 0;
 	previous_cycles = 0;
+	halt_ff_enabled = 0;
 
 	/* NOTE: The input pins are driven by the outside world, so they are left untouched */
 
@@ -2093,7 +2166,7 @@ int cpu_step(void)
 		 * (to increment the tick counter), but make sure there will be no wait once
 		 * the CPU is restarted
 		 */
-		ref_ts = wait_for_cycles(ref_ts, 5);
+		ref_ts = wait_for_cycles(ref_ts, halt_cycles());
 		previous_cycles = 0;
 	}
 

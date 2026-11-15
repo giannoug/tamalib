@@ -104,12 +104,14 @@ check: all warn
 # Best (shortest wall time) of BENCH_RUNS runs, each in its own process
 BENCH_ROMS ?= tama tamag2
 BENCH_RUNS ?= 3
+# Benchmark the current library with the HALT fast-forward (ignored by the reference)
+BENCH_ARGS ?= ff
 
 bench: $(CUR_BIN) $(NOLUT_BIN) $(REF_BIN)
 	@for rom in $(BENCH_ROMS); do \
 		for bin in $(REF_BIN) $(NOLUT_BIN) $(CUR_BIN); do \
 			for i in $$(seq $(BENCH_RUNS)); do \
-				$$bin bench $(ROM_DIR)/$$rom.bin $(BENCH_SECS); \
+				$$bin bench $(ROM_DIR)/$$rom.bin $(BENCH_SECS) $(BENCH_ARGS); \
 			done | sort -t, -k3 -n | head -1 | sed "s|^|$$bin: |"; \
 		done; \
 	done

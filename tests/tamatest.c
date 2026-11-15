@@ -265,6 +265,38 @@ static void synth_osc_loop(u12_t *prog)
 	prog[0x126] = 0x024; // JP   #0x24
 }
 
+/* Synthetic program using the programmable timer (256 Hz, reload 5): HALTs,
+ * and wakes up on the programmable timer interrupt. The timer is started at
+ * a tick that is not a multiple of the clock timer periods.
+ */
+static void synth_prog_timer(u12_t *prog)
+{
+	memset(prog, 0, PROGRAM_SIZE * sizeof(u12_t));
+
+	prog[0x100] = 0x020; // JP   #0x20
+	prog[0x10C] = 0x050; // JP   #0x50 (prog timer vector)
+
+	prog[0x120] = 0xE0F; // LD   A #0xF
+	prog[0x121] = 0xE80; // LD   XP A
+	prog[0x122] = 0xB26; // LD   X #0x26
+	prog[0x123] = 0xE25; // LD   MX #0x5 (reload data low)
+	prog[0x124] = 0xB27; // LD   X #0x27
+	prog[0x125] = 0xE20; // LD   MX #0x0 (reload data high)
+	prog[0x126] = 0xB12; // LD   X #0x12
+	prog[0x127] = 0xE21; // LD   MX #0x1 (prog timer interrupt mask)
+	prog[0x128] = 0xB78; // LD   X #0x78
+	prog[0x129] = 0xE23; // LD   MX #0x3 (reset and run the prog timer)
+	prog[0x12A] = 0xF48; // EI
+	prog[0x12B] = 0xFF8; // HALT
+	prog[0x12C] = 0x02B; // JP   #0x2B
+
+	prog[0x150] = 0xB02; // LD   X #0x02 (X = 0xF02)
+	prog[0x151] = 0xEC2; // LD   A MX (clear factor flags)
+	prog[0x152] = 0xF61; // INC  M(#0x01)
+	prog[0x153] = 0xF48; // EI
+	prog[0x154] = 0xFDF; // RET
+}
+
 /* Emulation helpers */
 
 static state_t *st;
@@ -318,15 +350,31 @@ static void btn_sched_apply(btn_sched_t *s)
 	}
 }
 
+/* Use the HALT fast-forward in run_until() (current library only) */
+static int use_ff = 0;
+
 /* Runs until the tick counter reaches target, returns the number of steps */
 static u32_t run_until(u32_t target, btn_sched_t *btn)
 {
 	u32_t steps = 0;
+#ifndef REF_BUILD
+	u32_t limit;
+#endif
 
 	while (!tick_reached(target)) {
 		if (btn != NULL) {
 			btn_sched_apply(btn);
 		}
+#ifndef REF_BUILD
+		if (use_ff) {
+			/* Never fast-forward past the next event */
+			limit = target;
+			if (btn != NULL && (int32_t) (btn->next - target) < 0) {
+				limit = btn->next;
+			}
+			tamalib_set_halt_ff(1, limit);
+		}
+#endif
 		tamalib_step();
 		steps++;
 	}
@@ -514,6 +562,9 @@ static int load_program(const char *name)
 		return 0;
 	} else if (!strcmp(name, "osc_loop")) {
 		synth_osc_loop(program);
+		return 0;
+	} else if (!strcmp(name, "synth_prog")) {
+		synth_prog_timer(program);
 		return 0;
 	}
 
@@ -916,10 +967,183 @@ static int st_set_speed_before_hal(void)
 	return 0;
 }
 
+#ifndef REF_BUILD
+/* With the HALT fast-forward, a run must end in exactly the same state as
+ * with plain stepping, in fewer steps
+ */
+static int ff_exact(const char *name, u32_t start, u32_t secs, int btn)
+{
+	btn_sched_t sched;
+	u32_t steps_plain, steps_ff, i;
+	uint64_t h_plain, h_ff;
+
+	if (load_program(name)) {
+		return SKIP;
+	}
+
+	for (i = 0; i < 2; i++) {
+		use_ff = i;
+		emu_init(TICK_HZ, 0);
+		if (start != 0) {
+			/* Start close to a tick counter wrap */
+			*st->tick_counter = start;
+			*st->clk_timer_2hz_timestamp = start;
+			*st->clk_timer_4hz_timestamp = start;
+			*st->clk_timer_8hz_timestamp = start;
+			*st->clk_timer_16hz_timestamp = start;
+			*st->clk_timer_32hz_timestamp = start;
+			*st->clk_timer_64hz_timestamp = start;
+			*st->clk_timer_128hz_timestamp = start;
+			*st->clk_timer_256hz_timestamp = start;
+			*st->prog_timer_timestamp = start;
+		}
+		btn_sched_init(&sched, start);
+		if (i == 0) {
+			steps_plain = run_until(start + secs * TICK_HZ, btn ? &sched : NULL);
+			h_plain = full_state_hash();
+		} else {
+			steps_ff = run_until(start + secs * TICK_HZ, btn ? &sched : NULL);
+			h_ff = full_state_hash();
+		}
+		tamalib_release();
+	}
+	use_ff = 0;
+
+	if (h_plain != h_ff || steps_ff > steps_plain) {
+		printf("  %s: fast-forward %016llx in %u steps, plain %016llx in %u steps\n", name,
+			(unsigned long long) h_ff, steps_ff, (unsigned long long) h_plain, steps_plain);
+		return 1;
+	}
+
+	/* The synthetic program is halted most of the time */
+	if (!strncmp(name, "synth", 5) && steps_ff * 10 > steps_plain) {
+		printf("  %s: fast-forward took %u steps, plain %u\n", name, steps_ff, steps_plain);
+		return 1;
+	}
+
+	return 0;
+}
+
+/* Stronger check: the state after every fast-forwarded step must be the state
+ * plain stepping reaches at the same emulated time (tick and fraction of tick)
+ */
+typedef struct {
+	uint64_t time;
+	uint64_t hash;
+} ff_point_t;
+
+static uint64_t emu_time(void)
+{
+	return (uint64_t) *st->tick_counter * 15625 + *st->scaled_cycle_accumulator;
+}
+
+static int ff_lockstep(const char *name, u32_t secs)
+{
+	ff_point_t *points;
+	u32_t n = 0, max, i;
+	int fail = 0;
+
+	if (load_program(name)) {
+		return SKIP;
+	}
+
+	max = secs * TICK_HZ / 5 + 1;
+	points = malloc(max * sizeof(ff_point_t));
+	if (points == NULL) {
+		return 1;
+	}
+
+	emu_init(TICK_HZ, 0);
+	while (!tick_reached(secs * TICK_HZ) && n < max) {
+		tamalib_set_halt_ff(1, secs * TICK_HZ);
+		tamalib_step();
+		points[n].time = emu_time();
+		points[n].hash = full_state_hash();
+		n++;
+	}
+	tamalib_release();
+
+	emu_init(TICK_HZ, 0);
+	for (i = 0; i < n && !fail; i++) {
+		/* Several steps can account no time (e.g. the first one, which has no
+		 * previous instruction), so look for a match among all the steps at
+		 * that emulated time
+		 */
+		do {
+			tamalib_step();
+		} while (emu_time() < points[i].time || (emu_time() == points[i].time && full_state_hash() != points[i].hash));
+
+		if (emu_time() != points[i].time) {
+			printf("  %s: fast-forward step %u (tick %llu) does not match plain stepping\n", name, i,
+				(unsigned long long) (points[i].time / 15625));
+			fail = 1;
+		}
+	}
+	tamalib_release();
+
+	free(points);
+	return fail;
+}
+
+static int st_ff_lockstep_synth(void) { return ff_lockstep("synth", 60); }
+static int st_ff_lockstep_synth_osc3(void) { return ff_lockstep("synth_osc3", 60); }
+static int st_ff_lockstep_synth_prog(void) { return ff_lockstep("synth_prog", 60); }
+static int st_ff_lockstep_tamamot(void) { return ff_lockstep("tamamot", 60); }
+
+/* A pending interrupt (here set through state_t) must be processed by the
+ * very next step of a halted CPU, fast-forward or not
+ */
+static int st_ff_pending_interrupt(void)
+{
+	uint64_t h[2];
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		synth_halt_isr(program, 0);
+		emu_init(TICK_HZ, 0);
+		run_until(TICK_HZ, NULL);
+		while (!*st->cpu_halted) {
+			tamalib_step();
+		}
+
+		st->interrupts[INT_K00_K03_SLOT].triggered = 1;
+		tamalib_set_halt_ff(i, 2 * TICK_HZ);
+		tamalib_step();
+		h[i] = full_state_hash();
+		tamalib_release();
+	}
+
+	if (h[0] != h[1]) {
+		printf("  fast-forward delayed a pending interrupt\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+static int st_ff_exact_synth(void) { return ff_exact("synth", 0, 600, 1); }
+static int st_ff_exact_synth_osc3(void) { return ff_exact("synth_osc3", 0, 600, 1); }
+static int st_ff_exact_tamaang(void) { return ff_exact("tamaang", 0, 600, 1); }
+static int st_ff_exact_tamamot(void) { return ff_exact("tamamot", 0, 600, 1); }
+static int st_ff_wrap_synth_osc3(void) { return ff_exact("synth_osc3", (u32_t) -5 * TICK_HZ, 10, 0); } /* straddles the wrap */
+#endif
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+#ifndef REF_BUILD
+	{"ff_lockstep_synth", &st_ff_lockstep_synth},
+	{"ff_lockstep_synth_osc3", &st_ff_lockstep_synth_osc3},
+	{"ff_lockstep_synth_prog", &st_ff_lockstep_synth_prog},
+	{"ff_lockstep_tamamot", &st_ff_lockstep_tamamot},
+	{"ff_pending_interrupt", &st_ff_pending_interrupt},
+	{"ff_exact_synth", &st_ff_exact_synth},
+	{"ff_exact_synth_osc3", &st_ff_exact_synth_osc3},
+	{"ff_exact_tamaang", &st_ff_exact_tamaang},
+	{"ff_exact_tamamot", &st_ff_exact_tamamot},
+	{"ff_wrap_synth_osc3", &st_ff_wrap_synth_osc3},
+#endif
 	{"no_ts_at_speed0", &st_no_ts_at_speed0},
 	{"set_speed_before_hal", &st_set_speed_before_hal},
 	{"restore_tama", &st_restore_tama},
@@ -967,8 +1191,8 @@ static int cmd_selftest(const char *name)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: tamatest hash <rom> <secs> <btn 0|1>\n"
-		"       tamatest bench <rom> <secs>\n"
+		"usage: tamatest hash <rom> <secs> <btn 0|1> [ff]\n"
+		"       tamatest bench <rom> <secs> [ff]\n"
 		"       tamatest selftest <name> <rom dir>\n"
 		"       tamatest list\n");
 }
@@ -976,6 +1200,9 @@ static void usage(void)
 int main(int argc, char **argv)
 {
 	int i;
+
+	/* An optional last "ff" argument enables the HALT fast-forward */
+	use_ff = (argc >= 2 && !strcmp(argv[argc - 1], "ff"));
 
 	if (argc >= 5 && !strcmp(argv[1], "hash")) {
 		return cmd_hash(argv[2], atoi(argv[3]), atoi(argv[4]));

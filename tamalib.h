@@ -28,6 +28,17 @@
 
 #define tamalib_set_speed(speed)			cpu_set_speed(speed)
 
+/* HALT fast-forward (speed 0 only, disabled by default and on reset)
+ * NOTE: When enabled, one step of a halted CPU performs all the following HALT
+ * steps that would only increment the tick counter, stopping at the first one
+ * that makes a timer expire or that brings the tick counter to limit_tick (or
+ * past it). The resulting state is exactly the one plain stepping would give.
+ * limit_tick is compared with the tick counter modulo 2^32, so it must be less
+ * than 2^31 ticks ahead: refresh it before each step or run, e.g. with
+ * min(target, now + 0x7FFFFFFF) for a longer target.
+ */
+#define tamalib_set_halt_ff(en, limit_tick)		cpu_set_halt_ff(en, limit_tick)
+
 #define tamalib_get_state()				cpu_get_state()
 #define tamalib_refresh_hw()				cpu_refresh_hw()
 
