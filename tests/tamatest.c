@@ -199,6 +199,33 @@ static void synth_halt_isr(u12_t *prog, bool_t osc3)
 	prog[0x148] = 0xFDF; // RET
 }
 
+/* Synthetic program enabling the K00-K02 input interrupts, then HALTing. Each
+ * interrupt runs an ISR that clears the factor flags and increments M(0x02).
+ */
+#define SYNTH_K0_ISR_ADDR			0x106
+
+static void synth_k0_isr(u12_t *prog)
+{
+	memset(prog, 0, PROGRAM_SIZE * sizeof(u12_t));
+
+	prog[0x100] = 0x020; // JP   #0x20
+	prog[0x106] = 0x060; // JP   #0x60 (K00-K03 vector)
+
+	prog[0x120] = 0xE0F; // LD   A #0xF
+	prog[0x121] = 0xE80; // LD   XP A
+	prog[0x122] = 0xB14; // LD   X #0x14 (X = 0xF14)
+	prog[0x123] = 0xE27; // LD   MX #0x7 (K00-K02 interrupts)
+	prog[0x124] = 0xF48; // EI
+	prog[0x125] = 0xFF8; // HALT
+	prog[0x126] = 0x025; // JP   #0x25
+
+	prog[0x160] = 0xB04; // LD   X #0x04 (X = 0xF04)
+	prog[0x161] = 0xEC2; // LD   A MX (clear factor flags)
+	prog[0x162] = 0xF62; // INC  M(#0x02)
+	prog[0x163] = 0xF48; // EI
+	prog[0x164] = 0xFDF; // RET
+}
+
 /* Synthetic program copying the K10-K13 input port to M(0x010) in a loop */
 static void synth_k1_read(u12_t *prog)
 {
@@ -525,6 +552,42 @@ static int reset_like_init(const char *name)
 static int st_reset_like_init_tama(void) { return reset_like_init("tama"); }
 static int st_reset_like_init_synth(void) { return reset_like_init("synth"); }
 
+/* A button press must trigger the K00-K03 interrupt when the program enabled it
+ * (writing the K00-K03 interrupt mask register), waking up a halted CPU
+ */
+static int st_button_interrupt(void)
+{
+	u32_t isr = 0, t;
+
+	synth_k0_isr(program);
+	emu_init(TICK_HZ, 0);
+	run_until(TICK_HZ / 2, NULL);
+
+	/* Press and release the middle button (K01, active low) */
+	tamalib_set_button(BTN_MIDDLE, BTN_STATE_PRESSED);
+	t = *st->tick_counter;
+	while (!tick_reached(t + TICK_HZ / 4)) {
+		tamalib_step();
+		if (*st->pc == SYNTH_K0_ISR_ADDR) {
+			isr++;
+		}
+	}
+	tamalib_set_button(BTN_MIDDLE, BTN_STATE_RELEASED);
+	while (!tick_reached(t + TICK_HZ)) {
+		tamalib_step();
+		if (*st->pc == SYNTH_K0_ISR_ADDR) {
+			isr++;
+		}
+	}
+
+	if (isr != 1 || GET_RAM_MEMORY(st->memory, 0x02) != 1) {
+		printf("  %u K00-K03 interrupts for one button press, want 1\n", isr);
+		return 1;
+	}
+
+	return 0;
+}
+
 /* The K10-K13 input port must read back the K10-K13 pin levels */
 static int st_k1_port_reads_pins(void)
 {
@@ -553,6 +616,7 @@ static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+	{"button_interrupt", &st_button_interrupt},
 	{"k1_port_reads_pins", &st_k1_port_reads_pins},
 	{"init_twice_tama", &st_init_twice_tama},
 	{"init_twice_tamaang", &st_init_twice_tamaang},
