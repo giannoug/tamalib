@@ -90,7 +90,7 @@ warn: $(addprefix $(CUR_DIR)/tamalib/,$(LIB_FILES)) $(CUR_DIR)/hal_types.h
 		$(CC) $(CFLAGS) $(LIB_DEFS) $(WARNFLAGS) -c -o /dev/null $(CUR_DIR)/tamalib/$$f || exit 1; \
 	done
 
-check: all
+check: all warn
 	./check.sh $(CUR_BIN) $(REF_BIN) $(ROM_DIR)
 
 # Best (shortest wall time) of BENCH_RUNS runs, each in its own process

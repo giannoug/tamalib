@@ -159,6 +159,46 @@ static int load_rom(const char *name)
 	return load_rom_file(path);
 }
 
+/* Synthetic program (no ROM needed): enables all clock timer interrupts, then
+ * HALTs. Each interrupt runs an ISR that clears the factor flags, increments
+ * M(0x00), optionally toggles the CPU clock between OSC1 and OSC3, then
+ * returns to the HALT.
+ */
+#define SYNTH_ISR_ADDR				0x102
+
+static void synth_halt_isr(u12_t *prog, bool_t osc3)
+{
+	memset(prog, 0, PROGRAM_SIZE * sizeof(u12_t));
+
+	prog[0x100] = 0x020; // JP   #0x20
+	prog[0x102] = 0x040; // JP   #0x40 (clock timer vector)
+
+	prog[0x120] = 0xE0F; // LD   A #0xF
+	prog[0x121] = 0xE80; // LD   XP A
+	prog[0x122] = 0xB10; // LD   X #0x10 (X = 0xF10)
+	prog[0x123] = 0xE2F; // LD   MX #0xF (all clock timer interrupts)
+	prog[0x124] = 0xF48; // EI
+	prog[0x125] = 0xFF8; // HALT
+	prog[0x126] = 0x025; // JP   #0x25
+
+	prog[0x140] = 0xB00; // LD   X #0x00 (X = 0xF00)
+	prog[0x141] = 0xEC2; // LD   A MX (clear factor flags)
+	prog[0x142] = 0xF60; // INC  M(#0x00)
+	if (osc3) {
+		prog[0x143] = 0xB70; // LD   X #0x70 (X = 0xF70)
+		prog[0x144] = 0xEC2; // LD   A MX
+		prog[0x145] = 0xD08; // XOR  A #0x8 (toggle OSC1/OSC3)
+		prog[0x146] = 0xEC8; // LD   MX A
+	} else {
+		prog[0x143] = 0xFFB; // NOP5
+		prog[0x144] = 0xFFB; // NOP5
+		prog[0x145] = 0xFFB; // NOP5
+		prog[0x146] = 0xFFB; // NOP5
+	}
+	prog[0x147] = 0xF48; // EI
+	prog[0x148] = 0xFDF; // RET
+}
+
 /* Emulation helpers */
 
 static state_t *st;
@@ -356,11 +396,37 @@ static int st_boot_draws(void)
 	return 0;
 }
 
+/* A halted CPU must service pending interrupts: the 32 Hz clock timer
+ * interrupt (the 1/2/8 Hz ones coincide with it) fires 32 times per second.
+ */
+static int st_halt_wakes(void)
+{
+	u32_t isr = 0;
+
+	synth_halt_isr(program, 0);
+	emu_init(TICK_HZ, 0);
+
+	while (!tick_reached(TICK_HZ)) {
+		tamalib_step();
+		if (*st->pc == SYNTH_ISR_ADDR) {
+			isr++;
+		}
+	}
+
+	if (isr != 32) {
+		printf("  %u interrupts serviced in 1 s, want 32\n", isr);
+		return 1;
+	}
+
+	return 0;
+}
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
 	{"boot_draws", &st_boot_draws},
+	{"halt_wakes", &st_halt_wakes},
 	{NULL, NULL},
 };
 

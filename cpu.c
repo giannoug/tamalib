@@ -1939,6 +1939,7 @@ int cpu_step(void)
 {
 	u12_t op;
 	u8_t i;
+	bool_t defer_int = 0;
 	breakpoint_t *bp = g_breakpoints;
 	static u8_t previous_cycles = 0;
 
@@ -1979,11 +1980,14 @@ int cpu_step(void)
 			}
 		}
 
+		/* Interrupts are not processed right after a PSET or EI operation */
+		defer_int = (ops[i].cb == &op_pset_cb || ops[i].cb == &op_ei_cb);
+
 		/* Prepare for the next instruction */
 		pc = next_pc;
 		previous_cycles = ops[i].cycles;
 
-		if (i != 0) {
+		if (ops[i].cb != &op_pset_cb) {
 			/* OP code is not PSET, reset NP */
 			np = (pc >> 8) & 0x1F;
 		}
@@ -1998,8 +2002,8 @@ int cpu_step(void)
 
 	handle_timers();
 
-	/* Check if there is any pending interrupt */
-	if (I && i != 0 && i != 58) { // Do not process interrupts after a PSET or EI operation
+	/* Check if there is any pending interrupt (a halted CPU always processes them) */
+	if (I && !defer_int) {
 		process_interrupts();
 	}
 
