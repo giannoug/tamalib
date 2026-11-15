@@ -381,6 +381,22 @@ static uint64_t state_hash(int with_trace)
 	return h;
 }
 
+/* Same, plus the timing state added to state_t after the original fields
+ * (not available in the reference, so only used by the self-tests)
+ */
+static uint64_t full_state_hash(void)
+{
+	uint64_t h = state_hash(1);
+
+#ifndef REF_BUILD
+	h = fnv(h, *st->previous_cycles);
+	h = fnv(h, *st->scaled_cycle_accumulator);
+	h = fnv(h, *st->cpu_frequency);
+#endif
+
+	return h;
+}
+
 static double wall_now(void)
 {
 	struct timespec ts;
@@ -515,13 +531,13 @@ static int init_twice(const char *name)
 
 	emu_init(TICK_HZ, 0);
 	run_until(60 * TICK_HZ, NULL);
-	h1 = state_hash(1);
+	h1 = full_state_hash();
 
 	tamalib_release();
 
 	emu_init(TICK_HZ, 0);
 	run_until(60 * TICK_HZ, NULL);
-	h2 = state_hash(1);
+	h2 = full_state_hash();
 
 	if (h1 != h2) {
 		printf("  %s: second init gives %016llx, first %016llx (tick %u, halted %u)\n", name,
@@ -551,7 +567,7 @@ static int reset_like_init(const char *name)
 
 	emu_init(TICK_HZ, 0);
 	run_until(60 * TICK_HZ, NULL);
-	h1 = state_hash(1);
+	h1 = full_state_hash();
 
 	tamalib_release();
 
@@ -564,7 +580,7 @@ static int reset_like_init(const char *name)
 	tamalib_reset();
 	trace_hash = FNV_INIT;
 	run_until(60 * TICK_HZ, NULL);
-	h2 = state_hash(1);
+	h2 = full_state_hash();
 
 	if (h1 != h2) {
 		printf("  %s: reset gives %016llx, fresh init %016llx\n", name,
@@ -729,10 +745,143 @@ static int st_pacing_synth_osc3_1000000(void) { return pacing("synth_osc3", 1000
 static int st_pacing_osc_loop_32768(void) { return pacing("osc_loop", 32768); }
 static int st_pacing_osc_loop_1000000(void) { return pacing("osc_loop", 1000000); }
 
+/* Save/restore of every state_t field, in TamaTool's order (src/state.c) */
+#define STATE_BUF_SIZE				4096
+
+typedef struct {
+	u8_t buf[STATE_BUF_SIZE];
+	u32_t pos;
+	int save;
+} state_io_t;
+
+static void io_u32(state_io_t *io, u32_t *v, u32_t mask)
+{
+	int i;
+
+	if (io->save) {
+		for (i = 0; i < 4; i++) {
+			io->buf[io->pos++] = (*v >> (i * 8)) & 0xFF;
+		}
+	} else {
+		*v = 0;
+		for (i = 0; i < 4; i++) {
+			*v |= (u32_t) io->buf[io->pos++] << (i * 8);
+		}
+		*v &= mask;
+	}
+}
+
+#define IO_FIELD(io, ptr, mask)			do { u32_t tmp_ = *(ptr); io_u32(io, &tmp_, mask); *(ptr) = tmp_; } while (0)
+
+static void state_io(state_io_t *io)
+{
+	int i;
+
+	io->pos = 0;
+	IO_FIELD(io, st->pc, 0x1FFF);
+	IO_FIELD(io, st->x, 0xFFF);
+	IO_FIELD(io, st->y, 0xFFF);
+	IO_FIELD(io, st->a, 0xF);
+	IO_FIELD(io, st->b, 0xF);
+	IO_FIELD(io, st->np, 0x1F);
+	IO_FIELD(io, st->sp, 0xFF);
+	IO_FIELD(io, st->flags, 0xF);
+	IO_FIELD(io, st->tick_counter, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_2hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_4hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_8hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_16hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_32hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_64hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_128hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->clk_timer_256hz_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->prog_timer_timestamp, 0xFFFFFFFF);
+	IO_FIELD(io, st->prog_timer_enabled, 0x1);
+	IO_FIELD(io, st->prog_timer_data, 0xFF);
+	IO_FIELD(io, st->prog_timer_rld, 0xFF);
+	IO_FIELD(io, st->call_depth, 0xFFFFFFFF);
+	for (i = 0; i < INT_SLOT_NUM; i++) {
+		IO_FIELD(io, &st->interrupts[i].factor_flag_reg, 0xF);
+		IO_FIELD(io, &st->interrupts[i].mask_reg, 0xF);
+		IO_FIELD(io, &st->interrupts[i].triggered, 0x1);
+		IO_FIELD(io, &st->interrupts[i].vector, 0xFF);
+	}
+	IO_FIELD(io, st->cpu_halted, 0x1);
+	for (i = 0; i < MEM_BUFFER_SIZE; i++) {
+		IO_FIELD(io, &st->memory[i], 0xFF);
+	}
+#ifndef REF_BUILD
+	/* Timing state added to state_t after the original fields */
+	IO_FIELD(io, st->previous_cycles, 0xFF);
+	IO_FIELD(io, st->scaled_cycle_accumulator, 0xFFFFFFFF);
+	IO_FIELD(io, st->cpu_frequency, 0xFFFFFFFF);
+#endif
+}
+
+/* Restoring a state into another running instance must continue exactly like
+ * the instance that saved it
+ */
+static int restore(const char *name)
+{
+	static state_io_t io;
+	u32_t s, save_tick, end_tick;
+	uint64_t ha, hb;
+	int fail = 0;
+
+	if (load_program(name)) {
+		return SKIP;
+	}
+
+	for (s = 7; s <= 16; s++) {
+		save_tick = s * TICK_HZ;
+		end_tick = save_tick + 20 * TICK_HZ;
+
+		/* A: save, then keep running */
+		emu_init(TICK_HZ, 0);
+		run_until(save_tick, NULL);
+		save_tick = *st->tick_counter;
+		io.save = 1;
+		state_io(&io);
+		trace_hash = FNV_INIT;
+		run_until(end_tick, NULL);
+		ha = full_state_hash();
+
+		/* B: run something else, restore, then run */
+		tamalib_release();
+		emu_init(TICK_HZ, 0);
+		run_until(3 * TICK_HZ + s, NULL);
+		io.save = 0;
+		state_io(&io);
+		tamalib_refresh_hw();
+		tamalib_set_exec_mode(EXEC_MODE_RUN);
+		trace_hash = FNV_INIT;
+		run_until(end_tick, NULL);
+		hb = full_state_hash();
+		tamalib_release();
+
+		if (ha != hb) {
+			printf("  %s: restored at tick %u: %016llx, want %016llx\n", name, save_tick,
+				(unsigned long long) hb, (unsigned long long) ha);
+			fail = 1;
+		}
+	}
+
+	return fail;
+}
+
+static int st_restore_tama(void) { return restore("tama"); }
+static int st_restore_tamaang(void) { return restore("tamaang"); }
+static int st_restore_synth_osc3(void) { return restore("synth_osc3"); }
+static int st_restore_osc_loop(void) { return restore("osc_loop"); }
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+	{"restore_tama", &st_restore_tama},
+	{"restore_tamaang", &st_restore_tamaang},
+	{"restore_synth_osc3", &st_restore_synth_osc3},
+	{"restore_osc_loop", &st_restore_osc_loop},
 	{"osc_switch_keeps_time", &st_osc_switch_keeps_time},
 	{"pacing_tama_32768", &st_pacing_tama_32768},
 	{"pacing_tama_1000000", &st_pacing_tama_1000000},

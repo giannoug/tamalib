@@ -251,6 +251,10 @@ static state_t cpu_state = {
 	.cpu_halted = &cpu_halted,
 
 	.memory = memory,
+
+	.previous_cycles = &previous_cycles,
+	.scaled_cycle_accumulator = &scaled_cycle_accumulator,
+	.cpu_frequency = &cpu_frequency,
 };
 
 

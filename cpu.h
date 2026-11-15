@@ -191,6 +191,14 @@ typedef struct {
 	bool_t *cpu_halted;
 
 	MEM_BUFFER_TYPE *memory;
+
+	/* NOTE: The fields below were added after the ones above. They hold the
+	 * remaining timing state, and must be saved/restored as well for a restored
+	 * state to resume exactly like the saved one.
+	 */
+	u8_t *previous_cycles; // cycles of the last executed instruction, not yet accounted
+	u32_t *scaled_cycle_accumulator; // fraction of tick not yet accounted
+	u32_t *cpu_frequency; // in Hz (OSC1 or OSC3)
 } state_t;
 
 
