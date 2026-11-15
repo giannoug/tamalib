@@ -46,6 +46,10 @@ bool_t tamalib_init(const u12_t *program, breakpoint_t *breakpoints, u32_t freq)
 
 	ts_freq = freq;
 
+	exec_mode = EXEC_MODE_RUN;
+	step_depth = 0;
+	screen_ts = 0;
+
 	return res;
 }
 

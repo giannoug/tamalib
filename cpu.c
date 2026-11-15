@@ -209,6 +209,7 @@ static timestamp_t ref_ts;
 static bool_t cpu_halted = 0;
 static u32_t cpu_frequency = OSC1_FREQUENCY; // in hz
 static u32_t scaled_cycle_accumulator = 0;
+static u8_t previous_cycles = 0;
 
 
 static state_t cpu_state = {
@@ -1915,16 +1916,52 @@ void cpu_reset(void)
 	SET_IO_MEMORY(memory, REG_LCD_CTRL, 0x8); // LCD control
 	SET_IO_MEMORY(memory, REG_K00_K03_INPUT_RELATION, 0xF); // Active high
 
+	/* Interrupts init (the vectors are constant) */
+	for (i = 0; i < INT_SLOT_NUM; i++) {
+		interrupts[i].factor_flag_reg = 0;
+		interrupts[i].mask_reg = 0;
+		interrupts[i].triggered = 0;
+	}
+
+	call_depth = 0;
+
+	/* Timers init */
+	tick_counter = 0;
+	clk_timer_2hz_timestamp = 0;
+	clk_timer_4hz_timestamp = 0;
+	clk_timer_8hz_timestamp = 0;
+	clk_timer_16hz_timestamp = 0;
+	clk_timer_32hz_timestamp = 0;
+	clk_timer_64hz_timestamp = 0;
+	clk_timer_128hz_timestamp = 0;
+	clk_timer_256hz_timestamp = 0;
+	prog_timer_timestamp = 0;
+	prog_timer_enabled = 0;
+	prog_timer_data = 0;
+	prog_timer_rld = 0;
+
+	cpu_halted = 0;
 	cpu_frequency = OSC1_FREQUENCY;
+	scaled_cycle_accumulator = 0;
+	previous_cycles = 0;
+
+	/* NOTE: The input pins are driven by the outside world, so they are left untouched */
 
 	cpu_sync_ref_timestamp();
 }
 
 bool_t cpu_init(const u12_t *program, breakpoint_t *breakpoints, u32_t freq)
 {
+	u8_t i;
+
 	g_program = program;
 	g_breakpoints = breakpoints;
 	ts_freq = freq;
+
+	/* Input pins start LOW, as on first boot (hw_init() will then set their actual state) */
+	for (i = 0; i < INPUT_PORT_NUM; i++) {
+		inputs[i].states = 0;
+	}
 
 	cpu_reset();
 
@@ -1941,7 +1978,6 @@ int cpu_step(void)
 	u8_t i;
 	bool_t defer_int = 0;
 	breakpoint_t *bp = g_breakpoints;
-	static u8_t previous_cycles = 0;
 
 	if (!cpu_halted) {
 		op = g_program[pc];

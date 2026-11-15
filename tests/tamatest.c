@@ -421,10 +421,104 @@ static int st_halt_wakes(void)
 	return 0;
 }
 
+/* Loads a ROM by name, or the synthetic program for "synth"/"synth_osc3" */
+static int load_program(const char *name)
+{
+	if (!strcmp(name, "synth")) {
+		synth_halt_isr(program, 0);
+		return 0;
+	} else if (!strcmp(name, "synth_osc3")) {
+		synth_halt_isr(program, 1);
+		return 0;
+	}
+
+	return load_rom(name);
+}
+
+/* A second tamalib_init() in the same process must behave like the first */
+static int init_twice(const char *name)
+{
+	uint64_t h1, h2;
+
+	if (load_program(name)) {
+		return SKIP;
+	}
+
+	emu_init(TICK_HZ, 0);
+	run_until(60 * TICK_HZ, NULL);
+	h1 = state_hash(1);
+
+	tamalib_release();
+
+	emu_init(TICK_HZ, 0);
+	run_until(60 * TICK_HZ, NULL);
+	h2 = state_hash(1);
+
+	if (h1 != h2) {
+		printf("  %s: second init gives %016llx, first %016llx (tick %u, halted %u)\n", name,
+			(unsigned long long) h2, (unsigned long long) h1, *st->tick_counter, *st->cpu_halted);
+		return 1;
+	}
+
+	return 0;
+}
+
+static int st_init_twice_tama(void) { return init_twice("tama"); }
+static int st_init_twice_tamaang(void) { return init_twice("tamaang"); }
+static int st_init_twice_tamamot(void) { return init_twice("tamamot"); }
+static int st_init_twice_synth(void) { return init_twice("synth"); }
+
+/* tamalib_reset() mid-run must behave like a fresh init (input pins being
+ * external, released buttons must still read as released)
+ */
+static int reset_like_init(const char *name)
+{
+	btn_sched_t sched;
+	uint64_t h1, h2;
+
+	if (load_program(name)) {
+		return SKIP;
+	}
+
+	emu_init(TICK_HZ, 0);
+	run_until(60 * TICK_HZ, NULL);
+	h1 = state_hash(1);
+
+	tamalib_release();
+
+	emu_init(TICK_HZ, 0);
+	btn_sched_init(&sched, 0);
+	run_until(30 * TICK_HZ, &sched);
+	tamalib_set_button(BTN_LEFT, BTN_STATE_RELEASED);
+	tamalib_set_button(BTN_MIDDLE, BTN_STATE_RELEASED);
+	tamalib_set_button(BTN_RIGHT, BTN_STATE_RELEASED);
+	tamalib_reset();
+	trace_hash = FNV_INIT;
+	run_until(60 * TICK_HZ, NULL);
+	h2 = state_hash(1);
+
+	if (h1 != h2) {
+		printf("  %s: reset gives %016llx, fresh init %016llx\n", name,
+			(unsigned long long) h2, (unsigned long long) h1);
+		return 1;
+	}
+
+	return 0;
+}
+
+static int st_reset_like_init_tama(void) { return reset_like_init("tama"); }
+static int st_reset_like_init_synth(void) { return reset_like_init("synth"); }
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+	{"init_twice_tama", &st_init_twice_tama},
+	{"init_twice_tamaang", &st_init_twice_tamaang},
+	{"init_twice_tamamot", &st_init_twice_tamamot},
+	{"init_twice_synth", &st_init_twice_synth},
+	{"reset_like_init_tama", &st_reset_like_init_tama},
+	{"reset_like_init_synth", &st_reset_like_init_synth},
 	{"boot_draws", &st_boot_draws},
 	{"halt_wakes", &st_halt_wakes},
 	{NULL, NULL},
