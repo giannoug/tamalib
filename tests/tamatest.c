@@ -199,6 +199,22 @@ static void synth_halt_isr(u12_t *prog, bool_t osc3)
 	prog[0x148] = 0xFDF; // RET
 }
 
+/* Synthetic program copying the K10-K13 input port to M(0x010) in a loop */
+static void synth_k1_read(u12_t *prog)
+{
+	memset(prog, 0, PROGRAM_SIZE * sizeof(u12_t));
+
+	prog[0x100] = 0x020; // JP   #0x20
+
+	prog[0x120] = 0xE0F; // LD   A #0xF
+	prog[0x121] = 0xE80; // LD   XP A
+	prog[0x122] = 0xB42; // LD   X #0x42 (X = 0xF42)
+	prog[0x123] = 0x810; // LD   Y #0x10 (Y = 0x010)
+	prog[0x124] = 0xEC2; // LD   A MX
+	prog[0x125] = 0xECC; // LD   MY A
+	prog[0x126] = 0x024; // JP   #0x24
+}
+
 /* Emulation helpers */
 
 static state_t *st;
@@ -509,10 +525,35 @@ static int reset_like_init(const char *name)
 static int st_reset_like_init_tama(void) { return reset_like_init("tama"); }
 static int st_reset_like_init_synth(void) { return reset_like_init("synth"); }
 
+/* The K10-K13 input port must read back the K10-K13 pin levels */
+static int st_k1_port_reads_pins(void)
+{
+	u32_t i;
+
+	synth_k1_read(program);
+	emu_init(TICK_HZ, 0);
+
+	cpu_set_input_pin(PIN_K10, PIN_STATE_HIGH);
+	cpu_set_input_pin(PIN_K11, PIN_STATE_LOW);
+	cpu_set_input_pin(PIN_K12, PIN_STATE_HIGH);
+	cpu_set_input_pin(PIN_K13, PIN_STATE_HIGH);
+	for (i = 0; i < 100; i++) {
+		tamalib_step();
+	}
+
+	if (GET_RAM_MEMORY(st->memory, 0x010) != 0xD) {
+		printf("  K10-K13 port reads 0x%X, want 0xD\n", GET_RAM_MEMORY(st->memory, 0x010));
+		return 1;
+	}
+
+	return 0;
+}
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+	{"k1_port_reads_pins", &st_k1_port_reads_pins},
 	{"init_twice_tama", &st_init_twice_tama},
 	{"init_twice_tamaang", &st_init_twice_tamaang},
 	{"init_twice_tamamot", &st_init_twice_tamamot},

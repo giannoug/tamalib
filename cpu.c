@@ -309,11 +309,12 @@ static void generate_interrupt(int_slot_t slot, u8_t bit)
 
 void cpu_set_input_pin(pin_t pin, pin_state_t state)
 {
-	u4_t old_state = (inputs[pin & 0x4].states >> (pin & 0x3)) & 0x1;
+	u8_t port = (pin & 0x4) >> 2; // K0x -> port 0, K1x -> port 1
+	u4_t old_state = (inputs[port].states >> (pin & 0x3)) & 0x1;
 
 	/* Trigger the interrupt if the state changed */
 	if (state != old_state) {
-		switch ((pin & 0x4) >> 2) {
+		switch (port) {
 			case 0:
 				/* Active HIGH/LOW depending on the relation register */
 				if (state != ((GET_IO_MEMORY(memory, REG_K00_K03_INPUT_RELATION) >> (pin & 0x3)) & 0x1)) {
@@ -331,7 +332,7 @@ void cpu_set_input_pin(pin_t pin, pin_state_t state)
 	}
 
 	/* Set the I/O */
-	inputs[pin & 0x4].states = (inputs[pin & 0x4].states & ~(0x1 << (pin & 0x3))) | (state << (pin & 0x3));
+	inputs[port].states = (inputs[port].states & ~(0x1 << (pin & 0x3))) | (state << (pin & 0x3));
 }
 
 void cpu_sync_ref_timestamp(void)
