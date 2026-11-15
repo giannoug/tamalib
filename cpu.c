@@ -1709,6 +1709,28 @@ static const op_t ops[] = {
 	{NULL, 0, 0, 0, 0, 0, NULL},
 };
 
+#ifdef OP_LOOKUP_TABLE
+/* Index in ops[] of each 12-bit op-code */
+static u8_t op_lut[4096];
+#endif
+
+
+/* Returns the index in ops[] of the first instruction matching an op-code
+ * (the index of the NULL entry if none)
+ */
+static u8_t lookup_op(u12_t op)
+{
+	u8_t i;
+
+	for (i = 0; ops[i].log != NULL; i++) {
+		if ((op & ops[i].mask) == ops[i].code) {
+			break;
+		}
+	}
+
+	return i;
+}
+
 
 static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
 	timestamp_t deadline;
@@ -1978,6 +2000,13 @@ void cpu_reset(void)
 bool_t cpu_init(const u12_t *program, breakpoint_t *breakpoints, u32_t freq)
 {
 	u8_t i;
+#ifdef OP_LOOKUP_TABLE
+	u13_t op;
+
+	for (op = 0; op < 4096; op++) {
+		op_lut[op] = lookup_op(op);
+	}
+#endif
 
 	g_program = program;
 	g_breakpoints = breakpoints;
@@ -2008,11 +2037,11 @@ int cpu_step(void)
 		op = g_program[pc];
 
 		/* Lookup the OP code */
-		for (i = 0; ops[i].log != NULL; i++) {
-			if ((op & ops[i].mask) == ops[i].code) {
-				break;
-			}
-		}
+#ifdef OP_LOOKUP_TABLE
+		i = op_lut[op & 0xFFF];
+#else
+		i = lookup_op(op);
+#endif
 
 		if (ops[i].log == NULL) {
 			g_hal->log(LOG_ERROR, "Unknown op-code 0x%X (pc = 0x%04X)\n", op, pc);

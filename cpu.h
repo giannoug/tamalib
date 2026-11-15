@@ -56,6 +56,11 @@
  */
 #define LOW_FOOTPRINT
 
+/* Define this (e.g. on the compiler command line) if you want to speed up the instruction decoding by
+ * using a 4096 bytes lookup table built at init time, instead of scanning the list of supported instructions.
+ */
+//#define OP_LOOKUP_TABLE
+
 #ifdef LOW_FOOTPRINT
 /* Invalid memory areas are not buffered to reduce the footprint of the library in memory */
 #define MEM_BUFFER_SIZE				(MEM_RAM_SIZE + MEM_DISPLAY1_SIZE + MEM_DISPLAY2_SIZE + MEM_IO_SIZE)/2
