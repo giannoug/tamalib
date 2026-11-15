@@ -295,6 +295,11 @@ void cpu_free_bp(breakpoint_t **list)
 
 void cpu_set_speed(u8_t speed)
 {
+	if (speed_ratio == 0 && speed != 0 && g_hal != NULL) {
+		/* The reference timestamp is not maintained at full speed */
+		cpu_sync_ref_timestamp();
+	}
+
 	if (speed != speed_ratio) {
 		/* The remainder is expressed in a unit depending on the speed */
 		speed_ratio = speed;
@@ -1751,8 +1756,10 @@ static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
 	}
 
 	if (speed_ratio == 0) {
-		/* Emulation will be as fast as possible */
-		return g_hal->get_timestamp();
+		/* Emulation will be as fast as possible, the reference timestamp will
+		 * be synced again when the speed changes
+		 */
+		return since;
 	}
 
 	/* Real time follows the tick counter, and the remainder of the conversion

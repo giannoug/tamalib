@@ -874,10 +874,54 @@ static int st_restore_tamaang(void) { return restore("tamaang"); }
 static int st_restore_synth_osc3(void) { return restore("synth_osc3"); }
 static int st_restore_osc_loop(void) { return restore("osc_loop"); }
 
+/* At full speed, the timestamp is not needed: it must not be read for every
+ * instruction, and real time must resume from the moment the speed changes
+ */
+static int st_no_ts_at_speed0(void)
+{
+	u32_t t0;
+
+	synth_halt_isr(program, 1);
+	emu_init(TICK_HZ, 0);
+
+	get_ts_calls = 0;
+	run_until(60 * TICK_HZ, NULL);
+	if (get_ts_calls != 0) {
+		printf("  %u get_timestamp() calls in 60 s at speed 0\n", get_ts_calls);
+		return 1;
+	}
+
+	/* Time passes, then real time emulation resumes */
+	fake_now = 1000000;
+	tamalib_set_speed(1);
+	t0 = *st->tick_counter;
+	run_until(t0 + 10 * TICK_HZ, NULL);
+	if (fake_now != 1000000 + (*st->tick_counter - t0)) {
+		printf("  clock at %u after %u ticks at speed 1, want %u\n", fake_now,
+			*st->tick_counter - t0, 1000000 + (*st->tick_counter - t0));
+		return 1;
+	}
+
+	return 0;
+}
+
+/* Setting the speed before registering the HAL must not crash */
+static int st_set_speed_before_hal(void)
+{
+	tamalib_register_hal(NULL);
+	tamalib_set_speed(0);
+	tamalib_set_speed(1);
+	tamalib_register_hal(&hal);
+
+	return 0;
+}
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+	{"no_ts_at_speed0", &st_no_ts_at_speed0},
+	{"set_speed_before_hal", &st_set_speed_before_hal},
 	{"restore_tama", &st_restore_tama},
 	{"restore_tamaang", &st_restore_tamaang},
 	{"restore_synth_osc3", &st_restore_synth_osc3},
