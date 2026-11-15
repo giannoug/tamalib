@@ -26,6 +26,13 @@
 #define OSC1_FREQUENCY				TICK_FREQUENCY // Hz
 #define OSC3_FREQUENCY				1000000 // Hz
 
+/* Duration of one CPU cycle, in 1/TICK_FRACTION ticks
+ * NOTE: TICK_FRACTION is chosen so that both durations are integers
+ */
+#define TICK_FRACTION				15625
+#define OSC1_CYCLE_DURATION			(TICK_FRACTION * TICK_FREQUENCY / OSC1_FREQUENCY) // 15625
+#define OSC3_CYCLE_DURATION			(TICK_FRACTION * TICK_FREQUENCY / OSC3_FREQUENCY) // 512
+
 #define TIMER_2HZ_PERIOD			(TICK_FREQUENCY/2) // in ticks
 #define TIMER_4HZ_PERIOD			(TICK_FREQUENCY/4) // in ticks
 #define TIMER_8HZ_PERIOD			(TICK_FREQUENCY/8) // in ticks
@@ -208,8 +215,9 @@ static timestamp_t ref_ts;
 
 static bool_t cpu_halted = 0;
 static u32_t cpu_frequency = OSC1_FREQUENCY; // in hz
-static u32_t scaled_cycle_accumulator = 0;
+static u32_t scaled_cycle_accumulator = 0; // in 1/TICK_FRACTION ticks
 static u8_t previous_cycles = 0;
+static u32_t ts_remainder = 0; // in 1/(TICK_FREQUENCY * speed_ratio) timestamp units
 
 
 static state_t cpu_state = {
@@ -283,7 +291,11 @@ void cpu_free_bp(breakpoint_t **list)
 
 void cpu_set_speed(u8_t speed)
 {
-	speed_ratio = speed;
+	if (speed != speed_ratio) {
+		/* The remainder is expressed in a unit depending on the speed */
+		speed_ratio = speed;
+		ts_remainder = 0;
+	}
 }
 
 state_t * cpu_get_state(void)
@@ -338,6 +350,7 @@ void cpu_set_input_pin(pin_t pin, pin_state_t state)
 void cpu_sync_ref_timestamp(void)
 {
 	ref_ts = g_hal->get_timestamp();
+	ts_remainder = 0;
 }
 
 static u4_t get_io(u12_t n)
@@ -571,13 +584,11 @@ static void set_io(u12_t n, u4_t v)
 			if ((v & 0x8) && cpu_frequency != OSC3_FREQUENCY) {
 				/* OSC3 */
 				cpu_frequency = OSC3_FREQUENCY;
-				scaled_cycle_accumulator = 0;
 				//g_hal->log(LOG_INFO, "Switch to OSC3\n");
 			}
 			if (!(v & 0x8) && cpu_frequency != OSC1_FREQUENCY) {
 				/* OSC1 */
 				cpu_frequency = OSC1_FREQUENCY;
-				scaled_cycle_accumulator = 0;
 				//g_hal->log(LOG_INFO, "Switch to OSC1\n");
 			}
 			break;
@@ -1698,16 +1709,19 @@ static const op_t ops[] = {
 static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
 	timestamp_t deadline;
 	u32_t ticks_pending;
+	u32_t scaled_ts;
 
-	/* The tick counter always works at TICK_FREQUENCY,
-	 * while the CPU runs at cpu_frequency
+	/* The tick counter always works at TICK_FREQUENCY, while the CPU runs at
+	 * cpu_frequency. The accumulator counts in 1/TICK_FRACTION of a tick, which
+	 * both clocks' cycles are an exact multiple of, so that no time is lost
+	 * when the CPU clock is switched.
 	 */
-	scaled_cycle_accumulator += cycles * TICK_FREQUENCY;
-	ticks_pending = scaled_cycle_accumulator/cpu_frequency;
+	scaled_cycle_accumulator += cycles * ((cpu_frequency == OSC3_FREQUENCY) ? OSC3_CYCLE_DURATION : OSC1_CYCLE_DURATION);
+	ticks_pending = scaled_cycle_accumulator/TICK_FRACTION;
 
 	if (ticks_pending > 0) {
 		tick_counter += ticks_pending;
-		scaled_cycle_accumulator -= ticks_pending * cpu_frequency;
+		scaled_cycle_accumulator -= ticks_pending * TICK_FRACTION;
 	}
 
 	if (speed_ratio == 0) {
@@ -1715,7 +1729,13 @@ static timestamp_t wait_for_cycles(timestamp_t since, u8_t cycles) {
 		return g_hal->get_timestamp();
 	}
 
-	deadline = since + (cycles * ts_freq)/(cpu_frequency * speed_ratio);
+	/* Real time follows the tick counter, and the remainder of the conversion
+	 * to timestamps is carried over, so that it stays exact whatever ts_freq is
+	 * NOTE: ts_freq must not exceed ~357 MHz to avoid an overflow
+	 */
+	scaled_ts = ticks_pending * ts_freq + ts_remainder;
+	deadline = since + scaled_ts/(TICK_FREQUENCY * speed_ratio);
+	ts_remainder = scaled_ts % (TICK_FREQUENCY * speed_ratio);
 	g_hal->sleep_until(deadline);
 
 	return deadline;

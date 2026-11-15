@@ -242,6 +242,29 @@ static void synth_k1_read(u12_t *prog)
 	prog[0x126] = 0x024; // JP   #0x24
 }
 
+/* Synthetic program toggling the CPU clock in a tight loop:
+ *   XOR A #0x8 (7 cycles), LD MX A (5 cycles, switches the clock), JP (5 cycles)
+ * Since an instruction's cycles are accounted at the clock running when the next
+ * one starts, every two iterations take 17 OSC1 cycles and 17 OSC3 cycles, i.e.
+ * 17 + 17 * 32768/1000000 = 17.557056 ticks.
+ */
+#define OSC_LOOP_ADDR				0x124
+
+static void synth_osc_loop(u12_t *prog)
+{
+	memset(prog, 0, PROGRAM_SIZE * sizeof(u12_t));
+
+	prog[0x100] = 0x020; // JP   #0x20
+
+	prog[0x120] = 0xE0F; // LD   A #0xF
+	prog[0x121] = 0xE80; // LD   XP A
+	prog[0x122] = 0xB70; // LD   X #0x70 (X = 0xF70)
+	prog[0x123] = 0xE00; // LD   A #0x0
+	prog[0x124] = 0xD08; // XOR  A #0x8
+	prog[0x125] = 0xEC8; // LD   MX A
+	prog[0x126] = 0x024; // JP   #0x24
+}
+
 /* Emulation helpers */
 
 static state_t *st;
@@ -473,6 +496,9 @@ static int load_program(const char *name)
 	} else if (!strcmp(name, "synth_osc3")) {
 		synth_halt_isr(program, 1);
 		return 0;
+	} else if (!strcmp(name, "osc_loop")) {
+		synth_osc_loop(program);
+		return 0;
 	}
 
 	return load_rom(name);
@@ -612,10 +638,110 @@ static int st_k1_port_reads_pins(void)
 	return 0;
 }
 
+static int osc3_enabled(void)
+{
+	return (GET_IO_MEMORY(st->memory, 0xF70) >> 3) & 0x1;
+}
+
+/* Switching between OSC1 and OSC3 must not lose any fraction of a tick */
+static int st_osc_switch_keeps_time(void)
+{
+	const u32_t n = 100000; // loop pairs
+	u32_t t1, frac, i;
+
+	synth_osc_loop(program);
+	emu_init(TICK_HZ, 0);
+
+	/* Align on the start of a loop pair running at OSC1 */
+	do {
+		tamalib_step();
+	} while (*st->pc != OSC_LOOP_ADDR || osc3_enabled());
+
+	t1 = *st->tick_counter;
+	for (i = 0; i < 6 * n; i++) {
+		tamalib_step();
+	}
+
+	if (*st->pc != OSC_LOOP_ADDR || osc3_enabled()) {
+		printf("  lost loop alignment\n");
+		return 1;
+	}
+
+	/* 17 ticks at OSC1 plus 17 * 32768/1000000 ticks at OSC3 per pair, plus an
+	 * unknown starting fraction of tick
+	 */
+	frac = *st->tick_counter - t1 - 17 * n;
+	if (frac != (8704ULL * n) / 15625 && frac != (8704ULL * n) / 15625 + 1) {
+		printf("  %u OSC3 ticks in %u loop pairs, want %llu\n", frac, n, (8704ULL * n) / 15625);
+		return 1;
+	}
+
+	return 0;
+}
+
+/* At speed 1, the fake clock must advance by exactly the emulated time */
+static timestamp_t last_deadline;
+static int deadline_backwards;
+
+static void check_sleep_until(timestamp_t ts)
+{
+	if ((int32_t) (ts - last_deadline) < 0) {
+		deadline_backwards = 1;
+	}
+	last_deadline = ts;
+	hal_sleep_until(ts);
+}
+
+static int pacing(const char *name, u32_t ts_freq)
+{
+	uint64_t want;
+
+	if (load_program(name)) {
+		return SKIP;
+	}
+
+	hal.sleep_until = &check_sleep_until;
+	last_deadline = 0;
+	deadline_backwards = 0;
+
+	emu_init(ts_freq, 1);
+	run_until(600 * TICK_HZ, NULL);
+
+	hal.sleep_until = &hal_sleep_until;
+
+	want = ((uint64_t) *st->tick_counter * ts_freq) / TICK_HZ;
+	if (fake_now != want || deadline_backwards) {
+		printf("  %s @ %u Hz: clock advanced by %u for %u ticks, want %llu%s\n", name, ts_freq,
+			fake_now, *st->tick_counter, (unsigned long long) want,
+			deadline_backwards ? " (deadline went backwards)" : "");
+		return 1;
+	}
+
+	return 0;
+}
+
+static int st_pacing_tama_32768(void) { return pacing("tama", 32768); }
+static int st_pacing_tama_1000000(void) { return pacing("tama", 1000000); }
+static int st_pacing_tamaang_32768(void) { return pacing("tamaang", 32768); }
+static int st_pacing_tamaang_1000000(void) { return pacing("tamaang", 1000000); }
+static int st_pacing_synth_osc3_32768(void) { return pacing("synth_osc3", 32768); }
+static int st_pacing_synth_osc3_1000000(void) { return pacing("synth_osc3", 1000000); }
+static int st_pacing_osc_loop_32768(void) { return pacing("osc_loop", 32768); }
+static int st_pacing_osc_loop_1000000(void) { return pacing("osc_loop", 1000000); }
+
 static const struct {
 	const char *name;
 	int (*fn)(void);
 } selftests[] = {
+	{"osc_switch_keeps_time", &st_osc_switch_keeps_time},
+	{"pacing_tama_32768", &st_pacing_tama_32768},
+	{"pacing_tama_1000000", &st_pacing_tama_1000000},
+	{"pacing_tamaang_32768", &st_pacing_tamaang_32768},
+	{"pacing_tamaang_1000000", &st_pacing_tamaang_1000000},
+	{"pacing_synth_osc3_32768", &st_pacing_synth_osc3_32768},
+	{"pacing_synth_osc3_1000000", &st_pacing_synth_osc3_1000000},
+	{"pacing_osc_loop_32768", &st_pacing_osc_loop_32768},
+	{"pacing_osc_loop_1000000", &st_pacing_osc_loop_1000000},
 	{"button_interrupt", &st_button_interrupt},
 	{"k1_port_reads_pins", &st_k1_port_reads_pins},
 	{"init_twice_tama", &st_init_twice_tama},

@@ -45,6 +45,8 @@ tamalib_release();
 
 /* ... */
 ```
+The timestamp frequency given to `tamalib_init()` does not need to divide the CPU clocks evenly: any frequency up to ~357 MHz keeps the real-time emulation exact.
+
 Your main project should then forward any button input to TamaLIB using the `tamalib_set_button()` function.
 
 As an alternative to `tamalib_mainloop()`, you can call `tamalib_step()` directly if your execution flow requires something more complex than a simple mainloop. In that case, TamaLIB will neither call the HAL `handler()` function, nor the HAL `update_screen()` function by itslef.
